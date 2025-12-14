@@ -2,24 +2,256 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Fourier Cursive</title>
-  <link rel="stylesheet" href="style.css" />
+  <title>Fourier Epicycles (Shapes)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; display: grid; grid-template-rows: auto 1fr; height: 100vh; }
+    .bar { padding: 12px; display: flex; gap: 12px; align-items: center; border-bottom: 1px solid #ddd; }
+    canvas { width: 100%; height: 100%; display: block; }
+    label { display:flex; gap:8px; align-items:center; }
+    input[type="range"]{ width: 220px; }
+  </style>
 </head>
 <body>
-  <div class="controls">
-    <input id="text" value="Hello" />
-    <button id="render">Render</button>
-    <label>M terms <input id="terms" type="range" min="5" max="500" value="120"></label>
+  <div class="bar">
+    <label>
+      Shape
+      <select id="shape">
+        <option value="heart">heart</option>
+        <option value="circle">circle</option>
+        <option value="star">star</option>
+      </select>
+    </label>
+
+    <label>
+      Samples N
+      <input id="N" type="range" min="128" max="2048" step="128" value="1024">
+      <span id="Nval">1024</span>
+    </label>
+
+    <label>
+      Terms M
+      <input id="M" type="range" min="5" max="600" step="5" value="150">
+      <span id="Mval">150</span>
+    </label>
+
+    <button id="rerun">Recompute</button>
+    <button id="pause">Pause</button>
+    <span id="hint" style="opacity:.7"></span>
   </div>
 
-  <canvas id="c" width="900" height="600"></canvas>
+  <canvas id="c"></canvas>
 
-  <!-- hidden svg for path sampling -->
-  <svg width="0" height="0" style="position:absolute">
-    <path id="path"></path>
-  </svg>
+<script>
+/* ----------------- helpers ----------------- */
+const TAU = Math.PI * 2;
 
-  <script src="https://cdn.jsdelivr.net/npm/opentype.js@latest/dist/opentype.min.js"></script>
-  <script src="main.js"></script>
+function complex(re, im) { return { re, im }; }
+function cAdd(a, b) { return { re: a.re + b.re, im: a.im + b.im }; }
+function cMul(a, b) { return { re: a.re*b.re - a.im*b.im, im: a.re*b.im + a.im*b.re }; }
+function cExp(theta) { return { re: Math.cos(theta), im: Math.sin(theta) }; }
+function cAbs(a) { return Math.hypot(a.re, a.im); }
+function cPhase(a) { return Math.atan2(a.im, a.re); }
+
+/* ----------------- shape point generators ----------------- */
+/**
+ * Returns N points as complex numbers around a closed curve, centered roughly at origin.
+ * These are PARAMETRIC shapes; later you'll replace this with "points from SVG path".
+ */
+function genShapePoints(shape, N) {
+  const pts = [];
+  for (let i = 0; i < N; i++) {
+    const t = (i / N) * TAU; // [0, 2pi)
+    let x, y;
+
+    if (shape === "circle") {
+      x = Math.cos(t);
+      y = Math.sin(t);
+    } else if (shape === "heart") {
+      // classic heart parametric curve
+      x = 16 * Math.pow(Math.sin(t), 3);
+      y = 13*Math.cos(t) - 5*Math.cos(2*t) - 2*Math.cos(3*t) - Math.cos(4*t);
+      // scale down
+      x /= 18; y /= 18;
+    } else if (shape === "star") {
+      // r varies to create a star-ish shape
+      const r = 0.65 + 0.35 * Math.cos(5*t);
+      x = r * Math.cos(t);
+      y = r * Math.sin(t);
+    } else {
+      x = Math.cos(t);
+      y = Math.sin(t);
+    }
+
+    pts.push(complex(x, y));
+  }
+
+  // Center and normalize scale for canvas friendliness
+  return normalizePoints(pts);
+}
+
+function normalizePoints(zs) {
+  const N = zs.length;
+  let mean = complex(0,0);
+  for (const z of zs) mean = cAdd(mean, z);
+  mean.re /= N; mean.im /= N;
+
+  const centered = zs.map(z => complex(z.re - mean.re, z.im - mean.im));
+
+  let maxMag = 0;
+  for (const z of centered) maxMag = Math.max(maxMag, Math.max(Math.abs(z.re), Math.abs(z.im)));
+  const s = maxMag > 0 ? 1 / maxMag : 1;
+
+  return centered.map(z => complex(z.re * s, z.im * s));
+}
+
+/* ----------------- DFT for complex samples ----------------- */
+/**
+ * DFT: C[k] = (1/N) * sum_{n=0..N-1} z[n] * exp(-j 2pi k n / N)
+ * We store with frequency mapping so we can have negative freqs.
+ */
+function dft(zs) {
+  const N = zs.length;
+  const coeffs = [];
+
+  for (let k = 0; k < N; k++) {
+    let sum = complex(0, 0);
+    for (let n = 0; n < N; n++) {
+      const theta = -TAU * k * n / N;
+      const w = cExp(theta);
+      sum = cAdd(sum, cMul(zs[n], w));
+    }
+    sum.re /= N; sum.im /= N;
+
+    // map k to signed frequency
+    const freq = (k <= N/2) ? k : k - N;
+
+    coeffs.push({
+      freq,
+      re: sum.re,
+      im: sum.im,
+      amp: cAbs(sum),
+      phase: cPhase(sum),
+    });
+  }
+
+  // Sort by amplitude so the "best" terms draw first
+  coeffs.sort((a, b) => b.amp - a.amp);
+  return coeffs;
+}
+
+/* ----------------- epicycle evaluation ----------------- */
+function evalFourier(coeffs, t, M) {
+  // t in [0,1)
+  let z = complex(0,0);
+  for (let i = 0; i < Math.min(M, coeffs.length); i++) {
+    const c = coeffs[i];
+    const ang = TAU * c.freq * t + c.phase;
+    z.re += c.amp * Math.cos(ang);
+    z.im += c.amp * Math.sin(ang);
+  }
+  return z;
+}
+
+/* ----------------- drawing ----------------- */
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+function fitCanvas() {
+  const dpr = devicePixelRatio || 1;
+  canvas.width = Math.floor(canvas.clientWidth * dpr);
+  canvas.height = Math.floor(canvas.clientHeight * dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0); // draw in CSS pixels
+}
+window.addEventListener("resize", () => { fitCanvas(); trail.length = 0; t = 0; });
+
+function toCanvas(z) {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  const scale = 0.40 * Math.min(w, h);
+  return { x: w/2 + z.re * scale, y: h/2 - z.im * scale };
+}
+
+let basePoints = [];
+let coeffs = [];
+let t = 0;
+let trail = [];
+let paused = false;
+
+function drawFrame() {
+  ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);
+
+  // Draw epicycles
+  let origin = { x: canvas.clientWidth/2, y: canvas.clientHeight/2 };
+  let x = origin.x, y = origin.y;
+
+  const M = +document.getElementById("M").value;
+
+  for (let i = 0; i < Math.min(M, coeffs.length); i++) {
+    const c = coeffs[i];
+    const r = c.amp * 0.40 * Math.min(canvas.clientWidth, canvas.clientHeight);
+    const ang = TAU * c.freq * t + c.phase;
+
+    // circle
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, TAU);
+    ctx.stroke();
+
+    // radius line
+    const nx = x + r * Math.cos(ang);
+    const ny = y - r * Math.sin(ang);
+
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(nx, ny);
+    ctx.stroke();
+
+    x = nx; y = ny;
+  }
+
+  // add tip to trail
+  trail.push({ x, y });
+
+  // draw trail
+  ctx.beginPath();
+  for (let i=0;i<trail.length;i++){
+    const p = trail[i];
+    if (i === 0) ctx.moveTo(p.x, p.y);
+    else ctx.lineTo(p.x, p.y);
+  }
+  ctx.stroke();
+
+  // advance time
+  if (!paused) {
+    t += 1 / basePoints.length; // one loop per N frames-ish
+    if (t >= 1) { t = 0; trail = []; }
+  }
+
+  requestAnimationFrame(drawFrame);
+}
+
+/* ----------------- UI wiring ----------------- */
+function recompute() {
+  const shape = document.getElementById("shape").value;
+  const N = +document.getElementById("N").value;
+  basePoints = genShapePoints(shape, N);
+  coeffs = dft(basePoints);
+  t = 0; trail = [];
+
+  document.getElementById("hint").textContent =
+    `Top term: freq=${coeffs[0].freq}, amp=${coeffs[0].amp.toFixed(3)} (M terms draws more detail)`;
+}
+
+document.getElementById("rerun").onclick = recompute;
+document.getElementById("pause").onclick = () => {
+  paused = !paused;
+  document.getElementById("pause").textContent = paused ? "Play" : "Pause";
+};
+
+document.getElementById("N").oninput = (e) => document.getElementById("Nval").textContent = e.target.value;
+document.getElementById("M").oninput = (e) => document.getElementById("Mval").textContent = e.target.value;
+document.getElementById("shape").onchange = recompute;
+
+fitCanvas();
+recompute();
+requestAnimationFrame(drawFrame);
+</script>
 </body>
 </html>
