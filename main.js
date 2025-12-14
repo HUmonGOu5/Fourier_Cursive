@@ -231,7 +231,7 @@ document.getElementById("toggle").onclick = () => {
     statusEl.textContent = "Font loaded. Click Render.";
   } catch (e) {
     console.error(e);
-    statusEl.textContent = "Failed to load font. Check ./fonts/Allura-Regular.ttf path.";
+    statusEl.textContent = "Failed to load font. Check Allura-Regular.ttf path.";
   }
   requestAnimationFrame(drawFrame);
 })();
