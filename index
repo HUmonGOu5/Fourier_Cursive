@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Fourier Cursive</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="controls">
+    <input id="text" value="Hello" />
+    <button id="render">Render</button>
+    <label>M terms <input id="terms" type="range" min="5" max="500" value="120"></label>
+  </div>
+
+  <canvas id="c" width="900" height="600"></canvas>
+
+  <!-- hidden svg for path sampling -->
+  <svg width="0" height="0" style="position:absolute">
+    <path id="path"></path>
+  </svg>
+
+  <script src="https://cdn.jsdelivr.net/npm/opentype.js@latest/dist/opentype.min.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>
