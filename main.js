@@ -227,7 +227,7 @@ document.getElementById("toggle").onclick = () => {
   fitCanvas();
   try {
     statusEl.textContent = "Loading Allura-Regular.ttf…";
-    font = await loadFont("./fonts/Allura-Regular.ttf");
+    font = await loadFont("Allura-Regular.ttf");
     statusEl.textContent = "Font loaded. Click Render.";
   } catch (e) {
     console.error(e);
